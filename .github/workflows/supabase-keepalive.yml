@@ -2,16 +2,49 @@ name: Supabase Keep-Alive
 
 on:
   schedule:
-    - cron: '0 0 */5 * *'  # 5日ごとに実行
+    - cron: '0 0 */4 * *'  # 4日ごとに実行（7日Pause閾値の余裕を持つ）
   workflow_dispatch:         # 手動実行も可能
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase
+      - name: Restore if Paused (requires SUPABASE_ACCESS_TOKEN)
+        if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
         run: |
-          curl -s -o /dev/null -w "%{http_code}" \
-            "https://ecazpfwkqdxdshonsopx.supabase.co/rest/v1/decks?select=id&limit=1" \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.supabase.com/v1/projects/ecazpfwkqdxdshonsopx" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}")
+          echo "Project status check: HTTP $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            STATE=$(curl -s \
+              "https://api.supabase.com/v1/projects/ecazpfwkqdxdshonsopx" \
+              -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" | \
+              grep -o '"status":"[^"]*"' | head -1)
+            echo "Project state: $STATE"
+            if echo "$STATE" | grep -qi "inactive\|paused"; then
+              echo "Project is paused. Restoring..."
+              curl -s -X POST \
+                "https://api.supabase.com/v1/projects/ecazpfwkqdxdshonsopx/restore" \
+                -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}"
+              echo "Restore request sent. Waiting 60s..."
+              sleep 60
+            fi
+          fi
+
+      - name: Ping Supabase REST API
+        run: |
+          for i in 1 2 3; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://ecazpfwkqdxdshonsopx.supabase.co/rest/v1/decks?select=id&limit=1" \
+              -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+              -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}")
+            echo "Attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+              echo "Supabase is alive (HTTP $CODE)"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "WARNING: Supabase ping failed after 3 attempts"
+          exit 1
